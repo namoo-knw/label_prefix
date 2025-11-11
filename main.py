@@ -1,5 +1,7 @@
 import logging
 import time
+import os
+from datetime import datetime
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
@@ -8,128 +10,101 @@ from selenium.webdriver.common.by import By
 from label_admin import label_login, close_chrome, HOME_URL
 from prefix_util import load_patterns_from_gsheet, process_page
 
-# --- [로거 설정] ---
-# 로그 레벨을 DEBUG로 설정하면 Selenium의 상세 로그까지 볼 수 있습니다.
-# INFO로 변경하면 조금 더 간결한 로그를 봅니다.
+# --- [로거 설정 (기존과 동일)] ---
 LOG_LEVEL = logging.DEBUG
 LOG_FORMAT = '[%(levelname)s] (%(name)s) %(asctime)s - %(message)s'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
-LOG_FILENAME = "automation.log"  # 로그 파일 이름
-
-# 1. 로거 가져오기
+SAVE_FOLDER = "save"
+os.makedirs(SAVE_FOLDER, exist_ok=True)
+timestamp_str = datetime.now().strftime("%m%d_%H%M%S")
+log_file_name = f"automation_{timestamp_str}.log"
+LOG_FILENAME = os.path.join(SAVE_FOLDER, log_file_name)
 logger = logging.getLogger("main_logger")
-logger.setLevel(LOG_LEVEL)  # 로거의 최소 레벨 설정
-
-# 2. 포맷터 생성
+logger.info(f"텍스트 로그 파일이 {LOG_FILENAME} 경로에 저장됩니다.")
+logger.setLevel(LOG_LEVEL)
 formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT)
-
-# 3. 핸들러가 이미 설정되었는지 확인 (중복 추가 방지)
 if not logger.hasHandlers():
-    # 3-1. 콘솔 핸들러 (StreamHandler)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(LOG_LEVEL)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-
-    # 3-2. 파일 핸들러 (FileHandler)
-    # mode='a' (append, 이어쓰기), encoding='utf-8' (한글 깨짐 방지)
     file_handler = logging.FileHandler(LOG_FILENAME, mode='a', encoding='utf-8')
     file_handler.setLevel(LOG_LEVEL)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
 
-# (기존 logging.basicConfig 라인 삭제됨)
-# (기존 logger = logging.getLogger("main_logger") 라인은 위로 이동됨)
+# --- [로거 설정 끝] ---
 
 
+# --- [수정된 main_task_loop 함수] ---
 def main_task_loop(driver, patterns):
     """
-    메인 작업 루프:
-    1. 메인 페이지 이동
-    2. '작업 시작' 클릭
-    3. 새 창으로 전환
-    4. 새 창에서 'process_page' 실행
-    5. 새 창 닫기
-    6. 메인 창으로 복귀
-    7. 반복
+    [수정된 메인 작업 루프]
+    1. '작업 시작'을 단 한 번만 클릭.
+    2. 새 창으로 단 한 번만 전환.
+    3. 새 창 안에서 process_page를 무한 반복 (새 작업이 자동으로 로드된다고 가정).
     """
     try:
-        # 시작 시점의 메인 윈도우 핸들 저장
+        # 1. 메인 페이지(HOME_URL)로 이동 (최초 1회)
+        logger.info("🚀 메인 페이지로 이동하여 '작업 시작'을 클릭합니다...")
+        driver.get(HOME_URL)
         original_window = driver.current_window_handle
-        logger.debug(f"메인 윈도우 핸들 저장: {original_window}")
 
+        # 2. '작업 시작' 버튼 클릭 (최초 1회)
+        WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.ID, "reviewStart"))
+        ).click()
+        logger.info("✅ '작업 시작' 클릭 완료. 새 창을 대기합니다...")
+
+        # 3. 새 창 대기 및 전환 (최초 1회)
+        WebDriverWait(driver, 15).until(EC.number_of_windows_to_be(2))
+
+        all_windows = driver.window_handles
+        new_window = None
+        for window in all_windows:
+            if window != original_window:
+                new_window = window
+                break
+
+        if not new_window:
+            logger.error("❌ 새 작업창을 찾지 못했습니다. 프로그램을 종료합니다.")
+            return
+
+        # [핵심] 새 작업창으로 영구적으로 전환합니다.
+        driver.switch_to.window(new_window)
+        logger.info(f"✅ 새 작업창으로 영구 전환 완료 (Handle: {new_window})")
+        logger.info("이제 이 창 안에서 작업이 자동으로 갱신된다고 가정하고 루프를 시작합니다.")
+
+        # 4. [수정] 새 창 안에서 무한 루프 시작
         while True:
             logger.info("=" * 50)
-            logger.info("🚀 새 작업 시작: 메인 페이지로 이동합니다...")
+            logger.info("🚀 다음 작업 처리를 시작합니다 (현재 창 갱신 대기)...")
 
             try:
-                # 1. 메인 페이지(HOME_URL)로 이동
-                driver.get(HOME_URL)
-
-                # 2. '작업 시작' 버튼 클릭
-                logger.info("'작업 시작' 버튼(#reviewStart)을 찾아 클릭합니다...")
-                WebDriverWait(driver, 15).until(
-                    EC.element_to_be_clickable((By.ID, "reviewStart"))
-                ).click()
-                logger.info("✅ '작업 시작' 클릭 완료. 새 창을 대기합니다...")
-
-                # 3. 새 창 대기 및 전환 (핵심 수정 사항)
-                # 2개의 창이 열릴 때까지 대기
-                WebDriverWait(driver, 15).until(EC.number_of_windows_to_be(2))
-
-                all_windows = driver.window_handles
-                new_window = None
-                for window in all_windows:
-                    if window != original_window:
-                        new_window = window
-                        break
-
-                if new_window:
-                    driver.switch_to.window(new_window)
-                    logger.info(f"✅ 새 작업창으로 전환 완료 (Handle: {new_window})")
-                else:
-                    logger.warning("⚠ 새 창을 찾지 못했습니다. 1초 대기 후 루프를 다시 시작합니다.")
-                    time.sleep(1)
-                    continue  # while 루프 처음으로
-
-                # 4. 새 창에서 작업 처리 (prefix_util.py 함수 호출)
+                # 5. 새 창에서 작업 처리 (prefix_util.py 함수 호출)
+                #    (process_page가 끝나면 웹사이트가 자동으로 다음 작업을 로드한다고 가정)
                 process_page(driver, patterns)
 
-                # 5. 작업 완료된 새 창 닫기
-                logger.info("작업창 처리가 완료되었습니다. 현재 창을 닫습니다...")
-                driver.close()
-
-                # 6. 드라이버 포커스를 메인 창으로 복귀
-                driver.switch_to.window(original_window)
-                logger.info(f"✅ 메인 창으로 복귀 완료 (Handle: {original_window})")
-
-                # 7. (안정성을 위한) 다음 작업 전 짧은 대기
+                # 6. 작업 처리 후, 웹사이트가 다음 작업을 로드할 시간을 줌
+                logger.info("✅ 작업 처리 완료. 다음 작업이 로드될 때까지 2초 대기...")
                 time.sleep(2)
 
             except Exception:
-                logger.error("❌ 작업 루프 중 오류 발생. 5초 후 다음 루프 시도.", exc_info=True)
-                # 메인 창으로 복귀 시도 (오류 발생 시 창 상태가 불명확할 수 있음)
-                try:
-                    # 현재 창이 2개 이상이면, 메인 창 제외하고 닫기
-                    if len(driver.window_handles) > 1:
-                        all_windows = driver.window_handles
-                        for window in all_windows:
-                            if window != original_window:
-                                driver.switch_to.window(window)
-                                driver.close()
-                    driver.switch_to.window(original_window)
-                    logger.info("오류 복구: 메인 창으로 강제 복귀")
-                except Exception as e_recovery:
-                    logger.fatal(f"FATAL: 메인 창 복구 실패. {e_recovery}")
-                    raise  # 복구 불가능 시 프로그램 종료
+                # process_page에서 오류가 나도 루프는 계속되어야 함
+                logger.error("❌ 작업 처리 중 오류 발생. 5초 후 다음 작업 시도.", exc_info=True)
+                # (오류 시 새로고침 등이 필요하면 여기에 추가)
+                # driver.refresh()
                 time.sleep(5)
-
 
     except KeyboardInterrupt:
         logger.info("🛑 사용자가 Ctrl+C를 눌러 작업을 중단했습니다.")
     except Exception:
+        # 새 창을 찾지 못하는 등의 치명적 오류
         logger.error(f"❌ 복구 불가능한 오류 발생. 작업 루프 종료.", exc_info=True)
+
+
+# --- [수정 끝] ---
 
 
 if __name__ == "__main__":
@@ -148,8 +123,9 @@ if __name__ == "__main__":
 
         if not patterns:
             logger.error("❌ 구글시트에서 패턴을 불러오지 못했습니다. 작업을 종료합니다.")
+            input("\n[!] 구글시트 패턴 로드 실패. 로그를 확인하세요.\n엔터 키를 누르면 프로그램을 종료합니다...")
         else:
-            # 3. 메인 작업 루프 실행
+            # 3. 메인 작업 루프 실행 (수정된 루프로 실행됨)
             main_task_loop(my_driver, patterns)
 
         # 4. 모든 작업 종료 후 드라이버 닫기
@@ -158,3 +134,4 @@ if __name__ == "__main__":
         close_chrome(my_driver)
     else:
         logger.error("❌ 로그인 실패. 프로그램을 종료합니다.")
+        input("\n[!] 로그인 실패. 아이디/비밀번호 또는 로그를 확인하세요.\n엔터 키를 누르면 프로그램을 종료합니다...")

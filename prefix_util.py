@@ -2,71 +2,70 @@ import time
 import re
 import logging
 import gspread
-import openpyxl  # 엑셀 처리를 위해 추가
-import os  # 파일 존재 여부 확인을 위해 추가
-from datetime import datetime  # 타임스탬프를 위해 추가
-from openpyxl.utils.exceptions import InvalidFileException
+import openpyxl  # 엑셀 로깅을 위해 추가
+import os  # 엑셀 로깅을 위해 추가
+from datetime import datetime  # 엑셀 로깅을 위해 추가
 from urllib.parse import urlparse
 from oauth2client.service_account import ServiceAccountCredentials
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import TimeoutException  # 예외 처리용
 
 # --- 로거 설정 ---
-# main.py에서 설정한 로거를 가져옵니다.
+# main_logger를 가져와서 사용 (ui_main.py에서 이미 설정됨)
 logger = logging.getLogger("main_logger")
 
 # --- 구글시트 설정 ---
 GSHEET_JSON = "indexcell-e71d69f270ca.json"  # 서비스 계정 JSON 파일
 GSHEET_NAME = "[RPA] 테스트용"  # 구글시트 문서 이름
 SHEET_NAME = "패턴단어"  # 시트 이름
-PATTERN_COL_NUM = 3  # 단어가 들어있는 컬럼 (A=1, B=2, C=3)
+PATTERN_COL_NUM = 3  # 단어가 들어있는 컬럼 (C열 = 3)
 
 # --- 엑셀 로그 설정 ---
-EXCEL_LOG_FILE = "automation_log.xlsx"
-EXCEL_HEADERS = ["작업시간", "추출된 href", "패턴 일치 결과", "작업 방법"]
+SAVE_FOLDER = "save"  # ui_main.py와 동일하게 'save' 폴더 사용
+# [수정] 파일명은 스크립트 시작 시 1회만 생성
+timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")  # 년도 추가됨
+EXCEL_LOG_FILE = os.path.join(SAVE_FOLDER, f"log_{timestamp_str}.xlsx")
+EXCEL_HEADER = ["작업시간", "href", "패턴 결과", "작업"]
 
 
-def log_to_excel(log_data: list):
+def log_to_excel(timestamp, href, match_result, action):
     """
-    작업 내역을 엑셀 파일에 한 줄 추가합니다.
-    log_data: 엑셀 헤더 순서에 맞는 데이터 리스트
+    작업 내역을 엑셀 파일에 한 줄씩 기록합니다.
     """
+    data_row = [timestamp, href, match_result, action]
+
     try:
-        # 1. 파일이 존재하는지 확인
+        # 1. 파일 존재 여부 확인
         if not os.path.exists(EXCEL_LOG_FILE):
-            # 1a. 파일이 없으면: 새 워크북 생성 및 헤더 추가
             logger.info(f"새 엑셀 로그 파일 생성: {EXCEL_LOG_FILE}")
+            # 새 워크북(엑셀 파일) 생성 및 헤더 추가
             workbook = openpyxl.Workbook()
             sheet = workbook.active
-            sheet.title = "Automation Log"
-            sheet.append(EXCEL_HEADERS)
+            sheet.title = "AutomationLog"
+            sheet.append(EXCEL_HEADER)  # 헤더 추가
         else:
-            # 1b. 파일이 있으면: 기존 워크북 로드
+            # 기존 파일 열기
             workbook = openpyxl.load_workbook(EXCEL_LOG_FILE)
             sheet = workbook.active
 
         # 2. 데이터 행 추가
-        sheet.append(log_data)
+        sheet.append(data_row)
 
         # 3. 파일 저장
         workbook.save(EXCEL_LOG_FILE)
-        logger.debug(f"엑셀 로그 저장 완료: {log_data[0]}")
+        logger.debug(f"엑셀 로그 저장 완료: {timestamp}")
 
-    except InvalidFileException:
-        logger.error(f"❌ 엑셀 파일({EXCEL_LOG_FILE})이 손상되었거나 엑셀 파일이 아닙니다. 로그를 기록할 수 없습니다.")
-    except PermissionError:
-        logger.warning(f"⚠ 엑셀 파일({EXCEL_LOG_FILE})이 다른 프로그램에서 열려있어 저장할 수 없습니다. (파일을 닫아주세요)")
     except Exception:
-        logger.error("❌ 엑셀 로그 저장 중 알 수 없는 오류 발생", exc_info=True)
+        logger.error(f"❌ 엑셀 로그 저장 실패. 데이터: {data_row}", exc_info=True)
 
 
 def load_patterns_from_gsheet():
     """구글시트에서 패턴 단어 불러오기"""
+    logger.info("구글시트에서 패턴 단어 불러오는 중...")
     try:
-        logger.info("구글시트에서 패턴 단어 불러오는 중...")
         scope = [
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
@@ -77,14 +76,14 @@ def load_patterns_from_gsheet():
 
         # C열 전체 읽기 (첫 번째 행 제외)
         patterns = sheet.col_values(PATTERN_COL_NUM)[1:]
-        # 빈 문자열 제거
+        # 빈 값 제거
         patterns = [p.strip() for p in patterns if p.strip()]
 
         logger.info(f"✅ 패턴 단어 {len(patterns)}개 불러옴 (예: {patterns[:3]}...)")
         return patterns
     except Exception:
-        logger.error(f"❌ 구글시트 불러오기 실패", exc_info=True)
-        return []
+        logger.error("❌ 구글시트 불러오기 실패.", exc_info=True)
+        return None
 
 
 def extract_domain_name(href: str) -> str:
@@ -93,10 +92,12 @@ def extract_domain_name(href: str) -> str:
         parsed = urlparse(href)
         netloc = parsed.netloc
         if ".tistory.com" in netloc:
+            # .tistory.com 앞부분을 반환
             domain_part = netloc.split(".tistory.com")[0]
             logger.debug(f"Tistory 도메인 파싱: {netloc} -> {domain_part}")
             return domain_part
 
+        # tistory가 아닌 경우 (예: example.com)
         logger.debug(f"일반 도메인 파싱: {netloc}")
         return netloc
     except Exception:
@@ -106,124 +107,127 @@ def extract_domain_name(href: str) -> str:
 
 def check_href_match(href, patterns):
     """도메인 부분이 '패턴단어 + 숫자 4자리 이상' 형식에 부합하는지 확인"""
-    if not href:
-        logger.warning("⚠ href가 비어있어 패턴 검사를 건너뜁니다.")
-        return False, None
-
     domain_name = extract_domain_name(href)
     logger.info(f"🔍 비교 대상 도메인: {domain_name}")
 
     for word in patterns:
-        # 정규식 생성: (단어)(숫자 4개 이상)
+        # 정규식 생성: (단어) + (숫자 4자리 이상) + (문자열 끝)
         regex = rf"^{re.escape(word)}\d{{4,}}$"
-        logger.debug(f"   [패턴 검사] {domain_name} vs {regex}")
+        logger.debug(f"    [패턴 검사] {domain_name} vs {regex}")
 
         if re.match(regex, domain_name):
             logger.info(f"✅ 정규식 일치: {regex} ← {domain_name}")
-            return True, word
+            return True, word  # (일치함, 일치한 단어)
 
     logger.info("❌ 정규식 불일치.")
-    return False, None
+    return False, None  # (일치 안 함, None)
 
 
 def process_page(driver, patterns):
-    """현재 페이지에서 href 검사 후 동작 실행 및 엑셀 로그 기록"""
-
-    # --- 로깅용 변수 초기화 ---
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    """
+    현재 페이지에서 href 검사 후 동작 실행.
+    [수정] UI 스레드에 보낼 값을 반환(return)합니다.
+    """
+    # 로깅용 변수 초기화
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     href_result = "N/A"
     match_result = "N/A"
-    action_taken = "알 수 없는 오류"  # 기본값을 오류로 설정
+    action_taken = "N/A"
 
     try:
         # 1️⃣ href 추출 단계
         logger.info("👉 [1/4] href 추출 시도 중...")
-        href = None  # href 변수 초기화
         try:
-            # CSS 선택자 span.h5 a 가 여러 개일 경우를 대비해 마지막 요소를 찾습니다.
-            href_elems = WebDriverWait(driver, 15).until(
+            # presence_of_all_elements_located: 해당 CSS를 가진 *모든* 요소를 찾음
+            href_elems = WebDriverWait(driver, 10).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, "span.h5 a"))
             )
             logger.debug(f"발견된 href 요소 개수: {len(href_elems)}")
-
-            href_elem = href_elems[-1]  # 가장 마지막 요소 선택
+            # 그 중 마지막 요소 (가장 하단의 링크)
+            href_elem = href_elems[-1]
             href = href_elem.get_attribute("href")
-
-            if not href:
-                logger.warning("⚠ href 요소를 찾았으나 href 속성이 비어있습니다.")
-                href_result = "속성 없음"  # 엑셀 기록용
-            else:
-                logger.info(f"🔗 href 추출 성공: {href}")
-                href_result = href  # 엑셀 기록용
-
+            href_result = href  # 로깅 변수에 저장
+            logger.info(f"🔗 href 추출 성공: {href}")
+        except TimeoutException:
+            logger.error("❌ [1/4 실패] href 요소를 10초 내에 찾지 못했습니다.")
+            match_result = "href 추출 실패"
+            action_taken = "오류"
+            return  # 'finally' 블록으로 이동
         except Exception:
-            # 요소를 못찾으면 TimeoutException 등이 발생합니다.
-            logger.warning(f"⚠ [1단계 경고] href 요소(span.h5 a)를 찾는 데 실패했습니다. '작업 미루기'로 진행합니다.", exc_info=True)
-            href_result = "요소 없음"  # 엑셀 기록용
+            logger.error("❌ [1/4 실패] href 추출 중 알 수 없는 오류", exc_info=True)
+            match_result = "href 추출 오류"
+            action_taken = "오류"
+            return  # 'finally' 블록으로 이동
 
         # 2️⃣ 패턴 일치 여부 확인
         logger.info("👉 [2/4] 패턴 일치 여부 확인 중...")
-        is_match = False
-        matched_word = None
         try:
-            # href가 None이 아닐 경우에만 패턴 검사
-            if href:
-                is_match, matched_word = check_href_match(href, patterns)
-                match_result = f"일치 ({matched_word})" if is_match else "불일치"  # 엑셀 기록용
-            else:
-                logger.info("href가 없어 패턴 검사를 건너뜁니다.")
-                match_result = "검사 안함 (href 없음)"  # 엑셀 기록용
-
+            is_match, matched_word = check_href_match(href_result, patterns)
         except Exception:
-            logger.error(f"❌ [2단계 실패] 패턴 검사 중 예외 발생", exc_info=True)
+            logger.error(f"❌ [2/4 실패] 패턴 검사 중 오류", exc_info=True)
             match_result = "패턴 검사 오류"
-            # 여기서 return하지 않고, '작업 미루기'로 진행되도록 합니다.
+            action_taken = "오류"
+            return  # 'finally' 블록으로 이동
 
         # 3️⃣ 패턴 일치 시 키보드 입력
         if is_match:
             try:
                 logger.info(f"👉 [3/4] 패턴 '{matched_word}' 일치 → 키보드 'E' 입력 시도")
+                match_result = f"일치 ({matched_word})"
+
                 actions = ActionChains(driver)
                 actions.send_keys('e').perform()
-                logger.info("⌨️ 'E' 키 입력 완료")
-                action_taken = "E (패턴 일치)"  # 엑셀 기록용
-            except Exception:
-                logger.error(f"❌ [3단계 실패] 키보드 입력 중 오류", exc_info=True)
-                action_taken = "E (입력 실패)"  # 엑셀 기록용
 
-        # 4️⃣ 패턴 불일치 시 '작업 미루기' 버튼 클릭 (is_match가 False이거나, 패턴 검사 오류 시)
+                logger.info("⌨️ 'E' 키 입력 완료")
+                action_taken = "E (패턴 일치)"
+            except Exception:
+                logger.error(f"❌ [3/4 실패] 키보드 'E' 입력 중 오류", exc_info=True)
+                action_taken = "E 입력 오류"
+                return
+
+        # 4️⃣ 패턴 불일치 시 '작업 미루기' 버튼 클릭
         else:
             try:
                 logger.info("👉 [3/4] 패턴 불일치 → '작업 미루기' 버튼 클릭 시도 중...")
-                postpone_btn = WebDriverWait(driver, 15).until(
+                match_result = "불일치"
+
+                postpone_btn = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, "//button[text()='작업 미루기']"))
                 )
                 postpone_btn.click()
                 logger.info("✅ '작업 미루기' 버튼 클릭 완료")
 
                 logger.info("👉 [4/4] '아무에게나 미루기' 버튼 클릭 시도 중...")
-                # '작업 미루기' 클릭 후 나타나는 팝업 메뉴(모달) 대기
-                assign_any_btn = WebDriverWait(driver, 15).until(
+                assign_any_btn = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, "//button[text()='아무에게나 미루기']"))
                 )
                 assign_any_btn.click()
                 logger.info("✅ '아무에게나 미루기' 버튼 클릭 완료")
-                action_taken = "작업 미루기"  # 엑셀 기록용
+                action_taken = "작업 미루기"
             except Exception:
-                logger.error(f"❌ [4단계 실패] '작업 미루기' 또는 '아무에게나 미루기' 버튼 클릭 중 오류", exc_info=True)
-                action_taken = "작업 미루기 (클릭 실패)"  # 엑셀 기록용
-
-        # 5️⃣ 대기 (다음 작업 전 안정성을 위해)
-        logger.debug("3초 대기 후 현재 창을 닫습니다...")
-        time.sleep(3)
+                logger.error(f"❌ [4/4 실패] '작업 미루기' 버튼 클릭 중 오류", exc_info=True)
+                action_taken = "미루기 오류"
+                return
 
     except Exception:
         logger.error(f"❌ [기타 예외] 페이지 처리 중 알 수 없는 오류", exc_info=True)
-        action_taken = "페이지 처리 중 심각한 오류"  # 엑셀 기록용
+        action_taken = "알 수 없는 오류"
 
     finally:
-        # --- [최종 로깅] ---
-        # try가 성공하든, except로 빠지든 항상 실행되어 엑셀 로그를 남깁니다.
-        log_data = [timestamp, href_result, match_result, action_taken]
-        logger.info(f"📋 엑셀 로그 기록 시도: {log_data}")
-        log_to_excel(log_data)
+        # 5️⃣ 엑셀에 결과 로깅
+        # (오류가 발생했든 성공했든, 지금까지의 결과를 기록)
+
+        # --- [오류 수정] ---
+        # 로깅할 데이터를 먼저 리스트로 만듭니다.
+        data_to_log = [timestamp, href_result, match_result, action_taken]
+
+        # [수정] 'data_row' 대신 'data_to_log' 변수를 사용합니다.
+        logger.info(f"📋 엑셀 로그 기록 시도: {data_to_log}")
+        log_to_excel(timestamp, href_result, match_result, action_taken)
+
+        # 6️⃣ 대기 및 다음 항목 준비 (UI 스레드로 반환)
+        logger.debug(f"3초 대기 후 현재 창을 닫습니다...")
+        time.sleep(3)
+
+        # ui_main.py의 Worker 스레드가 이 값을 받을 수 있도록 반환(return)합니다.
+        return href_result, match_result, action_taken
